@@ -3,61 +3,48 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"io"
+	"log"
 	"net/http"
 	"os"
 	"time"
 )
 
-func main() {
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+type Quote struct {
+	Bid string `json:"bid"`
+}
+
+func fetchQuote() (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 
-	client := &http.Client{}
 	req, err := http.NewRequestWithContext(ctx, "GET", "http://localhost:8080/cotacao", nil)
 	if err != nil {
-		fmt.Println("Erro ao criar a requisição HTTP:", err)
-		return
+		return "", err
 	}
 
-	resp, err := client.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		fmt.Println("Erro ao fazer a requisição HTTP:", err)
-		return
+		return "", err
 	}
 	defer resp.Body.Close()
 
-	fmt.Println("Código de Status da Resposta da API:", resp.Status)
-	if resp.StatusCode != http.StatusOK {
-		fmt.Println("Requisição retornou um código de status diferente de 200 OK")
-		return
+	var quote Quote
+	if err := json.NewDecoder(resp.Body).Decode(&quote); err != nil {
+		return "", err
 	}
 
-	var result map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		fmt.Println("Erro ao fazer o parse do JSON:", err)
-		return
-	}
+	return quote.Bid, nil
+}
 
-	bid, ok := result["bid"].(string)
-	if !ok {
-		fmt.Println("Campo 'bid' não encontrado no JSON")
-		return
-	}
-
-	file, err := os.Create("cotacao.txt")
+func main() {
+	quote, err := fetchQuote()
 	if err != nil {
-		fmt.Println("Erro ao criar o arquivo cotacao.txt:", err)
-		return
+		log.Fatalf("Erro ao Buscar a cotação: %v", err)
 	}
-	defer file.Close()
 
-	_, err = io.WriteString(file, fmt.Sprintf("Dólar: %s\n", bid))
+	content := []byte("Dólar: " + quote + "\n")
+	err = os.WriteFile("cotacao.txt", content, 0644)
 	if err != nil {
-		fmt.Println("Erro ao escrever no arquivo cotacao.txt:", err)
-		return
+		log.Fatalf("Erro ao gravar o arquivo: %v", err)
 	}
-
-	fmt.Printf("Cotação do Dólar: %s\n", bid)
 }

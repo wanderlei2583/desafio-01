@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -12,73 +11,75 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-func main() {
-	db, err := sql.Open("sqlite3", "cotacoes.db")
+type Quote struct {
+	Bid string `json:"bid"`
+}
+
+type APIResponse struct {
+	USDBRL Quote `json:"USDBRL"`
+}
+
+func fetchDollarQuote(ctx context.Context) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", "https://economia.awesomeapi.com.br/json/last/USD-BRL", nil)
 	if err != nil {
-		fmt.Println("Erro ao abrir o banco de dados:", err)
-		return
+		return "", err
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	var apiResp APIResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return "", err
+	}
+
+	return apiResp.USDBRL.Bid, nil
+}
+
+func recordQuoteInDB(ctx context.Context, quote string) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
+	defer cancel()
+
+	db, err := sql.Open("sqlite3", "quotes.db")
+	if err != nil {
+		return err
 	}
 	defer db.Close()
 
-	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS cotacoes (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		bid TEXT,
-		dataHora TIMESTAMP
-	)`)
+	_, err = db.ExecContext(ctx, "CREATE TABLE IF NOT EXISTS quotes (id INTEGER PRIMARY KEY, bid TEXT)")
 	if err != nil {
-		fmt.Println("Erro ao criar a tabela no banco de dados:", err)
+		return err
+	}
+
+	_, err = db.ExecContext(ctx, "INSERT INTO quotes (bid) VALUES (?)", quote)
+	return err
+}
+
+func quoteHandler(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	quote, err := fetchDollarQuote(ctx)
+	if err != nil {
+		http.Error(w, "Não foi possível buscar a cotação", http.StatusInternalServerError)
+		log.Println("fetchDollarQuote error:", err)
 		return
 	}
 
-	http.HandleFunc("/cotacao", func(w http.ResponseWriter, r *http.Request) {
-		ctx, cancel := context.WithTimeout(r.Context(), 200*time.Millisecond)
-		defer cancel()
+	if err := recordQuoteInDB(ctx, quote); err != nil {
+		http.Error(w, "Não foi possível gravar a cotação", http.StatusInternalServerError)
+		log.Println("recordQuoteInDB error:", err)
+		return
+	}
 
-		req, err := http.NewRequestWithContext(ctx, "GET", "https://economia.awesomeapi.com.br/json/last/USD-BRL", nil)
-		if err != nil {
-			http.Error(w, "Erro ao criar a requisição HTTP", http.StatusInternalServerError)
-			return
-		}
+	json.NewEncoder(w).Encode(Quote{Bid: quote})
+}
 
-		client := &http.Client{}
-		resp, err := client.Do(req)
-		if err != nil {
-			http.Error(w, "Erro ao fazer a requisição HTTP", http.StatusInternalServerError)
-			return
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			http.Error(w, fmt.Sprintf("Requisição retornou código de status %d", resp.StatusCode), http.StatusInternalServerError)
-			return
-		}
-
-		var result map[string]interface{}
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			log.Println("Erro ao fazer o parse do JSON:", err)
-			http.Error(w, "Erro ao fazer o parse do JSON", http.StatusInternalServerError)
-			return
-		}
-
-		log.Println("Resposta JSON da API:", result)
-
-		bid, ok := result["USDBRL"].(map[string]interface{})["bid"].(string)
-		if !ok {
-			log.Println("Campo 'bid' não encontrado no JSON")
-			http.Error(w, "Campo 'bid' não encontrado no JSON", http.StatusInternalServerError)
-			return
-		}
-
-		_, err = db.Exec("INSERT INTO cotacoes (bid, dataHora) VALUES (?, ?)", bid, time.Now())
-		if err != nil {
-			fmt.Println("Erro ao inserir cotação no banco de dados:", err)
-		}
-
-		cotacao := map[string]string{"bid": bid}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(cotacao)
-	})
-
-	http.ListenAndServe(":8080", nil)
+func main() {
+	http.HandleFunc("/cotacao", quoteHandler)
+	log.Fatal(http.ListenAndServe(":8080", nil))
 }
